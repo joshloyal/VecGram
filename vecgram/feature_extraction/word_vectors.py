@@ -5,6 +5,7 @@ from __future__ import unicode_literals
 import numpy as np
 from preshed.counter import PreshCounter
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA, TruncatedSVD
 import spacy
 
@@ -19,6 +20,26 @@ def get_embeddings(vocab):
         if lex.has_vector:
             vectors[lex.rank] = lex.vector
     return vectors
+
+
+def process_embeddings(embeddings, n_components, random_state=123):
+    """Process the word embeddings by subtracting off the common
+    mean and directions using the method in
+    "All-but-the-Top: Simple but Effective Postprocessing for Word Representations"
+    https://arxiv.org/pdf/1702.01417.pdf.
+    """
+
+    # subtract off the mean (no need to keep for test time
+    # since the embedding is fixed)
+    scaler = StandardScaler(with_std=False, copy=False)
+    embeddings = scaler.fit_transform(embeddings)
+
+    # perform a truncated svd
+    svd = TruncatedSVD(n_components=n_components, random_state=random_state)
+    projections = svd.fit_transform(embeddings)
+    embeddings -= np.dot(projections, svd.components_)
+
+    return embeddings
 
 
 def get_features(docs, n_docs, max_length=100):
@@ -41,10 +62,14 @@ class SpacyWordVectorTransformer(BaseEstimator, TransformerMixin):
                  max_document_length=100,
                  language='en',
                  batch_size=10000,
+                 post_process='pca',
+                 n_components_threshold='auto',
                  n_jobs=1):
         self.max_document_length = max_document_length
         self.language = language
         self.batch_size = batch_size
+        self.post_process = post_process
+        self.n_components_threshold = n_components_threshold
         self.n_jobs = get_n_jobs(n_jobs)
 
         self.nlp_ = None
@@ -54,6 +79,14 @@ class SpacyWordVectorTransformer(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None):
         self.nlp_ = spacy.load(self.language, parser=False, tagger=False, entity=False)
         self.embeddings_ = get_embeddings(self.nlp_.vocab)
+
+        if self.post_process == 'pca':
+            if self.n_components_threshold == 'auto':
+                k = int(self.embeddings_.shape[1] / 100.)
+            else:
+                k = self.n_components_threshold
+            self.embeddings_ = process_embeddings(self.embeddings_, n_components=k)
+
         return self
 
     def transform(self, X):
